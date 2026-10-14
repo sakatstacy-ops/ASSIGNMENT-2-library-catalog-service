@@ -1,8 +1,11 @@
 require('dotenv').config();
 
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 const Book = require('./models/Book');
 const Genre = require('./models/Genre');
+const Session = require('./models/Session');
+const User = require('./models/User');
 
 const genres = [
   { name: 'Science Fiction', slug: 'science-fiction' },
@@ -39,6 +42,15 @@ async function seed() {
   if (!process.env.MONGODB_URI) {
     throw new Error('Set MONGODB_URI in your .env file before running the seed script.');
   }
+  if (!process.env.LIBRARIAN_EMAIL || !process.env.LIBRARIAN_PASSWORD) {
+    throw new Error('Set LIBRARIAN_EMAIL and LIBRARIAN_PASSWORD to seed the librarian account.');
+  }
+  if (process.env.LIBRARIAN_PASSWORD.length < 12 || Buffer.byteLength(process.env.LIBRARIAN_PASSWORD, 'utf8') > 72) {
+    throw new Error('LIBRARIAN_PASSWORD must be at least 12 characters and no more than 72 UTF-8 bytes.');
+  }
+  if (/^<.*>$/.test(process.env.LIBRARIAN_PASSWORD)) {
+    throw new Error('Replace the placeholder LIBRARIAN_PASSWORD in .env with a unique secret.');
+  }
 
   await mongoose.connect(process.env.MONGODB_URI);
   await Book.deleteMany({});
@@ -52,7 +64,26 @@ async function seed() {
   }));
 
   await Book.insertMany(booksWithGenreIds);
+
+  const librarianEmail = process.env.LIBRARIAN_EMAIL.trim().toLowerCase();
+  const otherLibrarians = await User.find({ role: 'librarian', email: { $ne: librarianEmail } }).select('_id');
+  if (otherLibrarians.length) {
+    await Session.deleteMany({ user: { $in: otherLibrarians.map((user) => user._id) } });
+    await User.deleteMany({ _id: { $in: otherLibrarians.map((user) => user._id) } });
+  }
+  await User.findOneAndUpdate(
+    { email: librarianEmail },
+    {
+      $set: {
+        passwordHash: await bcrypt.hash(process.env.LIBRARIAN_PASSWORD, 12),
+        role: 'librarian',
+      },
+      $setOnInsert: { email: librarianEmail },
+    },
+    { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
+  );
   console.log(`Seeded ${insertedGenres.length} genres and ${booksWithGenreIds.length} books.`);
+  console.log('Ensured exactly one librarian account; password stored as a bcrypt hash.');
 }
 
 seed()
