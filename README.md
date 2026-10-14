@@ -10,7 +10,7 @@ Requirements: Node.js with npm and a MongoDB Atlas database (or another MongoDB 
 2. Copy `.env.example` to `.env` and replace the placeholders in `MONGODB_URI` with your MongoDB connection details. Use a dedicated development database: the seed removes all existing documents from its `books` and `genres` collections.
 3. Run `npm run seed`.
 
-The script inserts five genres and twenty books, then prints a summary. It can be run again safely to restore the same catalog. Never commit `.env` or expose its connection string.
+The script inserts five genres and twenty books, then prints a summary. It also ensures one librarian account exists. Set `LIBRARIAN_EMAIL` and a unique `LIBRARIAN_PASSWORD` of at least 12 characters and no more than 72 UTF-8 bytes in `.env`; the password is bcrypt-hashed before storage. The seed removes other librarian-role accounts but leaves patrons intact. It can be run again safely to restore the same catalog. Never commit `.env` or expose its connection string.
 
 ## Schema Design
 
@@ -73,6 +73,20 @@ Book and genre create/update routes validate required fields, JSON types, and sc
 
 ### Postman and tests
 
-Import [`postman/library-catalog.postman_collection.json`](postman/library-catalog.postman_collection.json) into Postman. Set `baseUrl`, and replace `genreId` and `bookId` with IDs from your database. The collection includes all book/genre endpoints, combined filtering, and a saved empty-body `400` validation example.
+Import [`postman/library-catalog.postman_collection.json`](postman/library-catalog.postman_collection.json) into Postman. Set `baseUrl`, `librarianEmail`, and `librarianPassword`; run login and copy its returned token to `librarianToken`. Replace `genreId` and `bookId` with IDs from your database. The collection includes auth/profile/logout, all book/genre endpoints, combined filtering, and a saved empty-body `400` validation example.
 
-Run `npm test` to execute the integration suite. Tests use `TEST_MONGODB_URI` when set, otherwise the isolated local database `library_catalog_api_test`; the suite clears the `books` and `genres` collections in that test database before and after running.
+Run `npm test` to execute the integration suite. Tests use `TEST_MONGODB_URI` when set, otherwise the isolated local database `library_catalog_api_test`; the suite clears the `books`, `genres`, `users`, and `sessions` collections in that test database before and after running.
+
+## Authentication and Authorization
+
+The API adds `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/users/profile`. Registration always creates a `patron`, even if a client includes a `role` property. The seed creates exactly one librarian from the environment credentials; do not hard-code the librarian password. Login returns a short-lived opaque bearer token and sets the same token in an `HttpOnly`, `SameSite=Strict` cookie. Passwords use bcrypt with a work factor of 12 and are limited to 72 UTF-8 bytes to avoid bcrypt input truncation. MongoDB stores only each password's bcrypt hash and a SHA-256 digest of each session token, never the plaintext password or reusable token.
+
+Book `POST`, `PUT`, and `DELETE` require a valid session and the `librarian` role. Missing or invalid tokens receive `401`; a valid patron token receives `403`. The profile endpoint derives identity from the verified session and returns only that user's ID, email, role, and creation time; query/body user IDs are ignored.
+
+### Token Storage Write-up
+
+Browser clients use an `HttpOnly`, `SameSite=Strict` cookie so JavaScript cannot read the session token, reducing the impact of an XSS bug stealing credentials. Cookies introduce CSRF considerations, so this service uses `SameSite=Strict`; a production deployment that adds cross-site workflows should also enforce trusted origins and a CSRF-token strategy. The cookie is marked `Secure` in production (or when `AUTH_COOKIE_SECURE=true`); local HTTP development leaves it unset. For non-browser clients such as Postman, login also returns the opaque token in JSON for an `Authorization: Bearer` header; those clients must keep it in a protected secret store and out of logs and source control.
+
+Rather than trusting a self-contained JWT until expiry, each opaque token is backed by a server-side session record. MongoDB stores only its SHA-256 digest, and the record expires after 24 hours. Logout deletes that record and clears the cookie, so the same token is rejected immediately whether it came from a cookie or bearer header. This provides reliable server-side revocation and avoids storing reusable tokens in the database, at the cost of a session-store lookup on each authenticated request and dependence on database availability. A localStorage token would be simpler for a browser SPA, but a successful XSS could read and exfiltrate it; this design accepts the lookup cost to reduce that exposure and make logout genuinely invalidate sessions.
+
+Configure `.env` including the librarian variables, run `npm install`, `npm run seed`, then `npm start`. The Postman collection includes registration, login, profile, logout, and librarian-protected book mutations. `npm test` covers anonymous `401`, patron `403`, librarian success, bcrypt password hashing, caller-only profile data, and session revocation.
